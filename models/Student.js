@@ -38,5 +38,6 @@ const studentSchema = new mongoose.Schema({
 
 // Index for efficient queries
 studentSchema.index({ classId: 1, sNo: 1 });
+studentSchema.index({ classId: 1, rollNo: 1 }, { unique: true });
 
 module.exports = mongoose.model('Student', studentSchema);

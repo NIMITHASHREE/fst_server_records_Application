@@ -1,0 +1,5 @@
+# Replace 203-0-113-10 with the Lightsail static IPv4 address, using dashes.
+203-0-113-10.sslip.io {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:5000
+}

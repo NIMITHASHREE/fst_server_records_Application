@@ -37,6 +37,6 @@ const attendanceSessionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // Index for efficient queries
-attendanceSessionSchema.index({ classId: 1, date: 1, type: 1 });
+attendanceSessionSchema.index({ classId: 1, date: 1, type: 1 }, { unique: true });
 
 module.exports = mongoose.model('AttendanceSession', attendanceSessionSchema);

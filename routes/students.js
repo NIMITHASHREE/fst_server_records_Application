@@ -5,7 +5,9 @@ const fs = require('fs');
 const ExcelJS = require('exceljs');
 const Class = require('../models/Class');
 const Student = require('../models/Student');
+const AttendanceSession = require('../models/AttendanceSession');
 const auth = require('../middleware/auth');
+const { validateComponents, validateStudents } = require('../utils/validation');
 
 const router = express.Router({ mergeParams: true });
 
@@ -15,7 +17,7 @@ router.use(auth);
 // ---- Multer config for Excel uploads ----
 const excelStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '..', 'uploads', 'temp');
+    const dir = path.join(path.resolve(process.env.UPLOAD_DIR || 'uploads'), 'temp');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
@@ -39,7 +41,7 @@ const uploadExcel = multer({
 // ---- Multer config for PDF uploads ----
 const pdfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '..', 'uploads', 'pdfs');
+    const dir = path.join(path.resolve(process.env.UPLOAD_DIR || 'uploads'), 'pdfs');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
@@ -99,6 +101,40 @@ function calculateTotal(student, classDoc) {
     }
   }
   return Math.round(total * 100) / 100; // round to 2 decimal places
+}
+
+async function replaceStudents(classDoc, inputStudents) {
+  const students = validateStudents(inputStudents, classDoc.components || []).map((student) => ({
+    ...student,
+    classId: classDoc._id,
+    totalInternalMarks: calculateTotal(student, classDoc),
+  }));
+  const existing = await Student.find({ classId: classDoc._id });
+  const existingByRoll = new Map(existing.map((student) => [student.rollNo.toLowerCase(), student]));
+  const operations = students.map((student) => {
+    const current = existingByRoll.get(student.rollNo.toLowerCase());
+    if (current) {
+      return { updateOne: { filter: { _id: current._id }, update: { $set: student } } };
+    }
+    return { insertOne: { document: student } };
+  });
+  if (operations.length) await Student.bulkWrite(operations, { ordered: true });
+
+  const retainedRolls = new Set(students.map((student) => student.rollNo.toLowerCase()));
+  const removedIds = existing
+    .filter((student) => !retainedRolls.has(student.rollNo.toLowerCase()))
+    .map((student) => student._id);
+  if (removedIds.length) {
+    await Student.deleteMany({ _id: { $in: removedIds }, classId: classDoc._id });
+    await AttendanceSession.updateMany(
+      { classId: classDoc._id },
+      { $pull: { absentees: { studentId: { $in: removedIds } } } },
+    );
+  }
+
+  classDoc.studentsUploaded = students.length > 0;
+  await classDoc.save();
+  return Student.find({ classId: classDoc._id }).sort({ sNo: 1 });
 }
 
 // =====================================================
@@ -161,13 +197,9 @@ router.post('/upload-students', uploadExcel.single('file'), async (req, res) => 
     }
 
     // Debug log — visible in your server console
-    console.log('[upload-students] headerRowIdx:', headerRowIdx, '| colMap:', colMap);
-    console.log('[upload-students] header row raw values:', headerRowIdx >= 0 ? allRows[headerRowIdx] : 'NOT FOUND');
-
     if (headerRowIdx === -1 || colMap.rollNo === undefined || colMap.name === undefined) {
       return res.status(400).json({
         message: 'Could not find a valid header row. Expected columns: Roll No, Name (S.No and Attendance are optional).',
-        debug: { headerRowIdx, colMap, firstThreeRows: allRows.slice(0, 3) },
       });
     }
 
@@ -209,20 +241,7 @@ router.post('/upload-students', uploadExcel.single('file'), async (req, res) => 
       });
     }
 
-    // Remove any previously uploaded students for this class
-    await Student.deleteMany({ classId: classDoc._id });
-
-    // Insert all parsed students
-    await Student.insertMany(students);
-
-    // Mark students as uploaded
-    classDoc.studentsUploaded = true;
-    await classDoc.save();
-
-    // Clean up temp file
-    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-
-    const insertedStudents = await Student.find({ classId: classDoc._id }).sort({ sNo: 1 });
+    const insertedStudents = await replaceStudents(classDoc, students);
 
     res.status(201).json({
       message: `${students.length} students uploaded successfully`,
@@ -230,9 +249,11 @@ router.post('/upload-students', uploadExcel.single('file'), async (req, res) => 
       students: insertedStudents,
     });
   } catch (error) {
-    if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
     console.error('Upload students error:', error);
-    res.status(500).json({ message: error.message || 'Server error' });
+    const status = error.code === 11000 ? 409 : 400;
+    res.status(status).json({ message: error.message || 'Unable to import students' });
+  } finally {
+    if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
   }
 });
 
@@ -268,41 +289,12 @@ router.put('/students', async (req, res) => {
       return res.status(400).json({ message: 'Students array is required' });
     }
 
-    // Delete existing students for this class
-    await Student.deleteMany({ classId: classDoc._id });
-
-    // Re-insert with updated data
-    const studentDocs = students.map((s, index) => ({
-      classId: classDoc._id,
-      sNo: s.sNo || index + 1,
-      rollNo: s.rollNo,
-      name: s.name,
-      attendancePercentage: Math.min(100, Math.max(0, Number(s.attendancePercentage) || 0)),
-      componentMarks: (s.componentMarks || []).map(cm => ({
-        componentName: cm.componentName,
-        mark: Number(cm.mark) || 0,
-      })),
-      totalInternalMarks: 0, // will be recalculated below
-    }));
-
-    // Calculate totals
-    for (const s of studentDocs) {
-      s.totalInternalMarks = calculateTotal(s, classDoc);
-    }
-
-    if (studentDocs.length > 0) {
-      await Student.insertMany(studentDocs);
-    }
-
-    // Update studentsUploaded flag
-    classDoc.studentsUploaded = studentDocs.length > 0;
-    await classDoc.save();
-
-    const saved = await Student.find({ classId: classDoc._id }).sort({ sNo: 1 });
+    const saved = await replaceStudents(classDoc, students);
     res.json(saved);
   } catch (error) {
     console.error('Update students error:', error);
-    res.status(500).json({ message: 'Server error' });
+    const status = error.code === 11000 ? 409 : 400;
+    res.status(status).json({ message: error.message || 'Unable to update students' });
   }
 });
 
@@ -319,17 +311,12 @@ router.put('/components', async (req, res) => {
 
     const { components, totalInternalTarget } = req.body;
 
-    if (components !== undefined) {
-      classDoc.components = components.map(c => ({
-        name: c.name,
-        maxMark: Number(c.maxMark) || 0,
-        weightage: Number(c.weightage) || 0,
-      }));
-    }
-
-    if (totalInternalTarget !== undefined) {
-      classDoc.totalInternalTarget = Number(totalInternalTarget) || 0;
-    }
+    const validated = validateComponents(
+      components ?? classDoc.components,
+      totalInternalTarget ?? classDoc.totalInternalTarget,
+    );
+    classDoc.components = validated.components;
+    classDoc.totalInternalTarget = validated.totalInternalTarget;
 
     await classDoc.save();
 
@@ -343,7 +330,7 @@ router.put('/components', async (req, res) => {
     res.json(classDoc);
   } catch (error) {
     console.error('Update components error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(400).json({ message: error.message || 'Unable to update components' });
   }
 });
 
