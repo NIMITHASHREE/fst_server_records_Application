@@ -4,6 +4,8 @@ const Class = require('../models/Class');
 const Student = require('../models/Student');
 const AttendanceSession = require('../models/AttendanceSession');
 const auth = require('../middleware/auth');
+const validateObjectIds = require('../middleware/validateObjectId');
+const { validateAttendancePayload } = require('../utils/validation');
 
 const router = express.Router({ mergeParams: true });
 
@@ -12,6 +14,23 @@ router.use(auth);
 // Helper: verify class ownership
 async function getClassForFaculty(classId, facultyId) {
   return await Class.findOne({ _id: classId, facultyId });
+}
+
+async function getClassStudentIds(classId) {
+  const students = await Student.find({ classId }).select('_id').lean();
+  return new Set(students.map((student) => student._id.toString()));
+}
+
+function sendAttendanceError(error, res) {
+  if (error.code === 11000) {
+    return res.status(409).json({ message: 'Attendance already exists for this class, date, and type' });
+  }
+  if (error.name === 'ValidationError' || error.name === 'CastError' || error.message?.startsWith('Attendance') ||
+      /date|period|absentee|student|type/i.test(error.message || '')) {
+    return res.status(400).json({ message: error.message });
+  }
+  console.error('Attendance error:', error);
+  return res.status(500).json({ message: 'Server error' });
 }
 
 // =====================================================
@@ -25,32 +44,22 @@ router.post('/', async (req, res) => {
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });
     if (classDoc.status === 'archived') return res.status(400).json({ message: 'Cannot modify an archived class' });
 
-    const { date, type, periods, absentees } = req.body;
-
-    if (!date || !type || !periods || !Array.isArray(periods) || periods.length === 0) {
-      return res.status(400).json({ message: 'Date, type, and periods are required' });
-    }
+    const studentIds = await getClassStudentIds(classDoc._id);
+    const attendance = validateAttendancePayload(req.body, studentIds);
 
     // For T courses, only theory is allowed
-    if (classDoc.courseType === 'T' && type !== 'theory') {
+    if (classDoc.courseType === 'T' && attendance.type !== 'theory') {
       return res.status(400).json({ message: 'Theory-only course. Cannot mark lab attendance.' });
     }
 
     const session = await AttendanceSession.create({
       classId: classDoc._id,
-      date: new Date(date),
-      type,
-      periods: periods.map(Number),
-      absentees: (absentees || []).map(a => ({
-        studentId: a.studentId,
-        periodsAbsent: (a.periodsAbsent || []).map(Number),
-      })),
+      ...attendance,
     });
 
     res.status(201).json(session);
   } catch (error) {
-    console.error('Create attendance error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return sendAttendanceError(error, res);
   }
 });
 
@@ -199,7 +208,7 @@ router.get('/download-excel', async (req, res) => {
 // GET /api/classes/:classId/attendance/:sessionId
 // Get one session
 // =====================================================
-router.get('/:sessionId', async (req, res) => {
+router.get('/:sessionId', validateObjectIds('sessionId'), async (req, res) => {
   try {
     const classDoc = await getClassForFaculty(req.params.classId, req.faculty._id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });
@@ -220,7 +229,7 @@ router.get('/:sessionId', async (req, res) => {
 // PUT /api/classes/:classId/attendance/:sessionId
 // Edit/correct an existing session
 // =====================================================
-router.put('/:sessionId', async (req, res) => {
+router.put('/:sessionId', validateObjectIds('sessionId'), async (req, res) => {
   try {
     const classDoc = await getClassForFaculty(req.params.classId, req.faculty._id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });
@@ -232,23 +241,22 @@ router.put('/:sessionId', async (req, res) => {
     });
     if (!session) return res.status(404).json({ message: 'Session not found' });
 
-    const { date, type, periods, absentees } = req.body;
-
-    if (date) session.date = new Date(date);
-    if (type) session.type = type;
-    if (periods && Array.isArray(periods)) session.periods = periods.map(Number);
-    if (absentees !== undefined) {
-      session.absentees = (absentees || []).map(a => ({
-        studentId: a.studentId,
-        periodsAbsent: (a.periodsAbsent || []).map(Number),
-      }));
+    const studentIds = await getClassStudentIds(classDoc._id);
+    const attendance = validateAttendancePayload({
+      date: req.body.date ?? session.date,
+      type: req.body.type ?? session.type,
+      periods: req.body.periods ?? session.periods,
+      absentees: req.body.absentees ?? session.absentees,
+    }, studentIds);
+    if (classDoc.courseType === 'T' && attendance.type !== 'theory') {
+      return res.status(400).json({ message: 'Theory-only course. Cannot mark lab attendance.' });
     }
+    session.set(attendance);
 
     await session.save();
     res.json(session);
   } catch (error) {
-    console.error('Update attendance error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return sendAttendanceError(error, res);
   }
 });
 
@@ -256,7 +264,7 @@ router.put('/:sessionId', async (req, res) => {
 // DELETE /api/classes/:classId/attendance/:sessionId
 // Delete a session
 // =====================================================
-router.delete('/:sessionId', async (req, res) => {
+router.delete('/:sessionId', validateObjectIds('sessionId'), async (req, res) => {
   try {
     const classDoc = await getClassForFaculty(req.params.classId, req.faculty._id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });

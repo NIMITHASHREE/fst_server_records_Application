@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const ExcelJS = require('exceljs');
@@ -7,8 +8,15 @@ const Class = require('../models/Class');
 const Student = require('../models/Student');
 const AttendanceSession = require('../models/AttendanceSession');
 const adminAuth = require('../middleware/adminAuth');
+const validateObjectIds = require('../middleware/validateObjectId');
 
 const router = express.Router();
+
+function equalSecret(value, expected) {
+  const valueDigest = crypto.createHash('sha256').update(String(value)).digest();
+  const expectedDigest = crypto.createHash('sha256').update(String(expected)).digest();
+  return crypto.timingSafeEqual(valueDigest, expectedDigest);
+}
 
 // Generate admin JWT
 const generateAdminToken = () => {
@@ -26,10 +34,10 @@ router.post('/login', (req, res) => {
     return res.status(400).json({ message: 'Username and password are required' });
   }
 
-  const adminUser = process.env.ADMIN_USERNAME || 'admin';
-  const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+  const adminUser = process.env.ADMIN_USERNAME;
+  const adminPass = process.env.ADMIN_PASSWORD;
 
-  if (username !== adminUser || password !== adminPass) {
+  if (!equalSecret(username, adminUser) || !equalSecret(password, adminPass)) {
     return res.status(401).json({ message: 'Invalid admin credentials' });
   }
 
@@ -104,7 +112,7 @@ router.get('/faculties', async (req, res) => {
 // =====================================================
 // GET /api/admin/faculties/:id/classes — Faculty's classes
 // =====================================================
-router.get('/faculties/:id/classes', async (req, res) => {
+router.get('/faculties/:id/classes', validateObjectIds('id'), async (req, res) => {
   try {
     const faculty = await Faculty.findById(req.params.id).select('-password');
     if (!faculty) return res.status(404).json({ message: 'Faculty not found' });
@@ -120,7 +128,7 @@ router.get('/faculties/:id/classes', async (req, res) => {
 // =====================================================
 // GET /api/admin/classes/:id — Full class detail (read-only)
 // =====================================================
-router.get('/classes/:id', async (req, res) => {
+router.get('/classes/:id', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findById(req.params.id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });
@@ -137,7 +145,7 @@ router.get('/classes/:id', async (req, res) => {
 // =====================================================
 // GET /api/admin/classes/:id/attendance/summary
 // =====================================================
-router.get('/classes/:id/attendance/summary', async (req, res) => {
+router.get('/classes/:id/attendance/summary', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findById(req.params.id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });
@@ -193,7 +201,7 @@ router.get('/classes/:id/attendance/summary', async (req, res) => {
 // GET /api/admin/classes/:id/download-excel
 // Download class marks sheet (same as faculty download)
 // =====================================================
-router.get('/classes/:id/download-excel', async (req, res) => {
+router.get('/classes/:id/download-excel', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findById(req.params.id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });
@@ -250,7 +258,7 @@ router.get('/classes/:id/download-excel', async (req, res) => {
 // GET /api/admin/classes/:id/attendance/download-excel
 // Download attendance sheet
 // =====================================================
-router.get('/classes/:id/attendance/download-excel', async (req, res) => {
+router.get('/classes/:id/attendance/download-excel', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findById(req.params.id);
     if (!classDoc) return res.status(404).json({ message: 'Class not found' });

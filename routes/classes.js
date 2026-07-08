@@ -4,6 +4,7 @@ const Class = require('../models/Class');
 const Student = require('../models/Student');
 const AttendanceSession = require('../models/AttendanceSession');
 const auth = require('../middleware/auth');
+const validateObjectIds = require('../middleware/validateObjectId');
 
 const router = express.Router();
 
@@ -57,7 +58,7 @@ router.post('/', async (req, res) => {
 });
 
 // GET /api/classes/:id — get a single class
-router.get('/:id', async (req, res) => {
+router.get('/:id', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findOne({
       _id: req.params.id,
@@ -75,7 +76,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // PUT /api/classes/:id — update class details
-router.put('/:id', async (req, res) => {
+router.put('/:id', validateObjectIds('id'), async (req, res) => {
   try {
     const { semesterNumber, academicYear, session, courseCode, courseName } = req.body;
 
@@ -111,7 +112,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // PUT /api/classes/:id/archive — archive a class
-router.put('/:id/archive', async (req, res) => {
+router.put('/:id/archive', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findOne({
       _id: req.params.id,
@@ -135,7 +136,7 @@ router.put('/:id/archive', async (req, res) => {
 });
 
 // DELETE /api/classes/:id — delete a class and all associated data
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', validateObjectIds('id'), async (req, res) => {
   try {
     const classDoc = await Class.findOne({
       _id: req.params.id,
