@@ -1,0 +1,23 @@
+[Unit]
+Description=FST Records API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fst-api
+Group=fst-api
+WorkingDirectory=/opt/fst-api
+EnvironmentFile=/etc/fst-api.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fst-api/uploads
+
+[Install]
+WantedBy=multi-user.target
